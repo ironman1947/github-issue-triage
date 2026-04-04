@@ -1,0 +1,19 @@
+spec_version: 1
+name: github_issue_triage
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+description: >
+  GitHub Issue Triage environment where an AI agent reads real-world
+  GitHub issues and assigns labels, teams, priorities and suggests fixes.
+tasks:
+  - id: easy
+    description: Assign the correct label to a GitHub issue
+    difficulty: easy
+  - id: medium
+    description: Assign the correct label and team to a GitHub issue
+    difficulty: medium
+  - id: hard
+    description: Assign label, team, priority and suggest a fix action
+    difficulty: hard
