@@ -170,10 +170,10 @@ uv run inference.py
 
 | Task | Baseline Score (Llama 3.1 8B) |
 |------|-------------------------------|
-| Easy | 1.0000 |
-| Medium | 0.0000 |
-| Hard | 0.7200 |
-| **Average** | **0.5733** |
+| Easy | 1.0000  |
+| Medium | 1.0000  |
+| Hard | 0.8667  |
+| **Average** | **0.9556** |
 
 ---
 
