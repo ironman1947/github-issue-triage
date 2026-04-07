@@ -210,6 +210,7 @@ async def run_task(task_id: str, client: OpenAI) -> float:
                 result = await env.step(action)
                 obs = result.observation
                 reward = result.reward or 0.0
+                reward = min(max(reward, 0.01), 0.99)
                 done = result.done
 
                 rewards.append(reward)
@@ -227,14 +228,14 @@ async def run_task(task_id: str, client: OpenAI) -> float:
                     break
 
         score = reward  # single step episode, reward IS the score
-        score = min(max(score, 0.0), 1.0)
+        score = min(max(score, 0.01), 0.99)
         success = score >= SUCCESS_THRESHOLD
 
     except Exception as exc:
         print(f"[DEBUG] Task '{task_id}' failed: {exc}", flush=True)
-        score = 0.0
+        score = 0.01
         success = False
-        rewards = [0.0]
+        rewards = [0.01]
         steps_taken = 0
 
     finally:
@@ -267,7 +268,7 @@ async def main() -> None:
 
     # Final summary
     total_score = sum(all_scores) / len(all_scores)
-    total_score = min(max(total_score, 0.0), 1.0)
+    total_score = min(max(total_score, 0.01), 0.99)
 
     print("\n" + "="*60, flush=True)
     print("  FINAL RESULTS", flush=True)

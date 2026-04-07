@@ -283,6 +283,7 @@ def grade_action(
             f"(+{action_score * 0.2:.2f})."
         )
 
+    reward = max(0.01, min(0.99, reward))
     return round(reward, 4), " | ".join(feedback_parts)
 
 
