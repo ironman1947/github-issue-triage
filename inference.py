@@ -77,33 +77,17 @@ Example response:
 # LOGGING — required [START] [STEP] [END] format
 # ──────────────────────────────────────────
 def log_start(task: str, env: str, model: str) -> None:
-    print(json.dumps({
-        "event": "START",
-        "task": task,
-        "env": env,
-        "model": model,
-    }), flush=True)
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
 def log_step(step: int, action: dict, reward: float, done: bool, error=None) -> None:
-    print(json.dumps({
-        "event": "STEP",
-        "step": step,
-        "action": action,
-        "reward": reward,
-        "done": done,
-        "error": str(error) if error else None,
-    }), flush=True)
+    label = action.get("label", "")
+    team = action.get("team", "")
+    print(f"[STEP] step={step} reward={reward} done={done} label={label} team={team}", flush=True)
 
 
-def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    print(json.dumps({
-        "event": "END",
-        "success": success,
-        "steps": steps,
-        "score": round(score, 4),
-        "rewards": rewards,
-    }), flush=True)
+def log_end(success: bool, steps: int, score: float, rewards: list) -> None:
+    print(f"[END] success={success} steps={steps} score={score} rewards={rewards}", flush=True)
 
 
 # ──────────────────────────────────────────
