@@ -1,85 +1,87 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
-Data models for the GitHub Issue Triage Environment.
+models.py — GitHub Issue Triage Environment
+Team Astra.AI: Om Chougule (Lead), Shraman Patil
 
-The agent reads a GitHub issue and must:
-  - Easy:   Assign the correct LABEL (bug / feature / docs / question)
-  - Medium: Assign label + correct TEAM (frontend / backend / ml / devops)
-  - Hard:   Assign label + team + PRIORITY (critical/high/medium/low)
-            + suggest a first fix ACTION
+Typed Pydantic models for Action, Observation, and State.
+All fields documented for OpenEnv spec compliance.
 """
 
-from typing import Optional
-from openenv.core.env_server.types import Action, Observation
-from pydantic import Field
+from typing import List, Optional
+from openenv.core.env_server import Action, Observation, State
 
 
-# ──────────────────────────────────────────
-# ACTION — what the agent decides
-# ──────────────────────────────────────────
 class GithubIssueTriageAction(Action):
     """
-    The agent's triage decision for a GitHub issue.
+    The agent's triage decision for one GitHub issue.
 
-    For easy task   → only label is required.
-    For medium task → label + team are required.
-    For hard task   → label + team + priority + suggested_action required.
+    Fields:
+        label            — Required. Issue category. One of: bug | feature | docs | question
+        team             — Team to route to. One of: frontend | backend | ml | devops | docs
+                           Required for medium + hard tasks. Null for easy task.
+        priority         — Urgency level. One of: critical | high | medium | low
+                           Required for hard task only. Null for easy + medium.
+        suggested_action — A brief, concrete action the assignee should take.
+                           Required for hard task only. Null for easy + medium.
+        reasoning        — One-sentence justification for the triage decision.
+                           Always encouraged; not graded but helps debugging.
     """
 
-    label: str = Field(
-        ...,
-        description="Issue label. One of: 'bug', 'feature', 'docs', 'question'"
-    )
-    team: Optional[str] = Field(
-        default=None,
-        description="Team to assign. One of: 'frontend', 'backend', 'ml', 'devops'"
-    )
-    priority: Optional[str] = Field(
-        default=None,
-        description="Priority level. One of: 'critical', 'high', 'medium', 'low'"
-    )
-    suggested_action: Optional[str] = Field(
-        default=None,
-        description="A short first fix suggestion, e.g. 'Check null pointer in auth module'"
-    )
-    reasoning: Optional[str] = Field(
-        default=None,
-        description="Why the agent made this decision (used for logging)"
-    )
+    label: str
+    team: Optional[str] = None
+    priority: Optional[str] = None
+    suggested_action: Optional[str] = None
+    reasoning: Optional[str] = None
 
 
-# ──────────────────────────────────────────
-# OBSERVATION — what the agent sees
-# ──────────────────────────────────────────
 class GithubIssueTriageObservation(Observation):
     """
-    What the agent sees at each step — a GitHub issue to triage.
+    What the agent sees at each step.
+
+    Fields:
+        issue_id          — GitHub issue number, e.g. "#105"
+        issue_title       — Title of the issue
+        issue_body        — Full body text of the issue
+        repo_name         — Repository the issue belongs to
+        author            — GitHub username who filed the issue
+        existing_comments — List of comments already on the issue (context)
+        task_id           — Current task difficulty: easy | medium | hard
+        task_description  — Natural-language description of what the agent must do
+        last_reward       — Reward received from the previous step (0.0 on reset)
+        feedback          — Human-readable feedback from the last grader result
+        step_number       — Current step index within the episode
     """
 
-    # The issue content
-    issue_id: str = Field(default="", description="Issue ID, e.g. '#142'")
-    issue_title: str = Field(default="", description="Title of the GitHub issue")
-    issue_body: str = Field(default="", description="Full body/description of the issue")
-    repo_name: str = Field(default="", description="Repository name, e.g. 'meta-pytorch/OpenEnv'")
-    author: str = Field(default="", description="GitHub username who opened the issue")
-    existing_comments: list[str] = Field(
-        default_factory=list,
-        description="Any existing comments on the issue"
-    )
+    issue_id: str = ""
+    issue_title: str = ""
+    issue_body: str = ""
+    repo_name: str = "meta-pytorch/OpenEnv"
+    author: str = ""
+    existing_comments: List[str] = []
+    task_id: str = "easy"
+    task_description: str = ""
+    last_reward: float = 0.0
+    feedback: str = ""
+    step_number: int = 0
 
-    # Task context
-    task_id: str = Field(default="easy", description="Current task: 'easy', 'medium', or 'hard'")
-    task_description: str = Field(default="", description="What the agent needs to do")
 
-    # Feedback from last step
-    last_reward: float = Field(default=0.0, description="Reward from previous action")
-    feedback: str = Field(default="", description="Feedback message explaining last reward")
+class GithubIssueTriageState(State):
+    """
+    Full internal state of the environment (not shown to agent).
 
-    # Episode info
-    done: bool = Field(default=False, description="Whether the episode is over")
-    step_number: int = Field(default=0, description="Current step number")
+    Fields:
+        episode_id   — Unique ID for this episode
+        task_id      — Current task difficulty
+        issue_id     — ID of the issue currently being triaged
+        step_count   — Total steps taken in this episode
+        total_reward — Cumulative reward across all steps
+        last_reward  — Reward from the most recent step
+        done         — Whether the episode has ended
+    """
+
+    episode_id: str = ""
+    task_id: str = "easy"
+    issue_id: str = ""
+    step_count: int = 0
+    total_reward: float = 0.0
+    last_reward: float = 0.0
+    done: bool = False

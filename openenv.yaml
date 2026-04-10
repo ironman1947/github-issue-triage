@@ -4,16 +4,66 @@ type: space
 runtime: fastapi
 app: server.app:app
 port: 8000
+tags:
+  - openenv
+  - real-world
+  - triage
+  - github
+  - nlp
 description: >
-  GitHub Issue Triage environment where an AI agent reads real-world
-  GitHub issues and assigns labels, teams, priorities and suggests fixes.
+  GitHub Issue Triage — an RL environment where an AI agent reads real GitHub
+  issues and makes structured decisions: assigning labels, routing to the right
+  engineering team, scoring priority, and suggesting a concrete fix action.
+  Designed for training and evaluating LLM-based triage agents.
+
 tasks:
   - id: easy
-    description: Assign the correct label to a GitHub issue
+    description: >
+      Read a GitHub issue and assign the correct label.
+      Valid labels: bug | feature | docs | question.
+      Grader: 1.0 for correct label, 0.0 for wrong.
     difficulty: easy
+    max_steps: 1
+    reward_threshold: 1.0
+
   - id: medium
-    description: Assign the correct label and team to a GitHub issue
+    description: >
+      Read a GitHub issue and assign the correct label AND team.
+      Valid teams: frontend | backend | ml | devops | docs.
+      Grader: label (0.5) + team (0.5).
     difficulty: medium
+    max_steps: 1
+    reward_threshold: 0.5
+
   - id: hard
-    description: Assign label, team, priority and suggest a fix action
+    description: >
+      Read a GitHub issue and assign label, team, priority, AND a suggested fix action.
+      Priority options: critical | high | medium | low.
+      Grader: label (0.30) + team (0.30) + priority (0.20) + fix suggestion quality (0.20).
     difficulty: hard
+    max_steps: 1
+    reward_threshold: 0.5
+
+observation_space:
+  type: structured
+  fields:
+    issue_id: string
+    issue_title: string
+    issue_body: string
+    repo_name: string
+    author: string
+    existing_comments: list[string]
+    task_id: string
+    task_description: string
+    last_reward: float
+    feedback: string
+    step_number: integer
+
+action_space:
+  type: structured
+  fields:
+    label: "string — one of: bug | feature | docs | question"
+    team: "string | null — one of: frontend | backend | ml | devops | docs"
+    priority: "string | null — one of: critical | high | medium | low"
+    suggested_action: "string | null — brief concrete fix recommendation"
+    reasoning: "string | null — justification for the triage decision"

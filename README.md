@@ -1,201 +1,185 @@
 ---
-title: GitHub Issue Triage Environment
+title: GitHub Issue Triage — OpenEnv
 emoji: 🐛
-colorFrom: indigo
+colorFrom: blue
 colorTo: purple
 sdk: docker
-pinned: false
-app_port: 8000
-base_path: /web
+pinned: true
 tags:
   - openenv
   - reinforcement-learning
-  - agent
-  - github
+  - nlp
   - triage
+  - real-world
 ---
 
 # 🐛 GitHub Issue Triage — OpenEnv Environment
 
-A real-world reinforcement learning environment where an AI agent learns to
-triage GitHub issues — assigning labels, teams, priorities, and suggesting
-first fix steps.
-
-Built for the **Meta PyTorch OpenEnv Hackathon 2026**.
+**Meta PyTorch OpenEnv Hackathon × Scaler School of Technology**  
+**Team Astra.AI** · Om Chougule (Lead) · Shraman Patil
 
 ---
 
-## 👥 Team Astra.AI
+## What is this?
 
-| Name | Role |
-|------|------|
-| **Om Chougule** | Team Lead |
-| **Shraman Patil** | Member |
+A real-world **Reinforcement Learning environment** where an AI agent reads GitHub
+issues and performs structured triage decisions — the exact task that software
+engineers do dozens of times per day.
 
----
+The agent must:
+1. Read an issue title, body, author, and existing comments
+2. Assign a **label** (bug / feature / docs / question)
+3. Route it to the correct **team** (frontend / backend / ml / devops / docs)
+4. Score its **priority** (critical / high / medium / low)
+5. Suggest a **concrete fix action**
 
-## 🎯 What the Agent Does
-
-The agent reads a GitHub issue (title, body, comments) and must make a
-triage decision — just like a real engineer triaging an issue queue.
-
-### 3 Tasks (Easy → Hard)
-
-| Task | What Agent Must Do | Max Reward |
-|------|--------------------|------------|
-| 🟢 **Easy** | Assign correct **label** (`bug` / `feature` / `docs` / `question`) | 1.0 |
-| 🟡 **Medium** | Assign correct **label** + **team** (`frontend` / `backend` / `ml` / `devops`) | 1.0 |
-| 🔴 **Hard** | Assign **label** + **team** + **priority** + suggest a **first fix action** | 1.0 |
+This directly trains agents for real developer productivity tools (GitHub Copilot,
+Linear, Jira auto-assign, etc.).
 
 ---
 
-## 🔌 API Usage
+## Environment Design
 
-### Quick Start
+### Action Space
 
-```python
-from github_issue_triage import GithubIssueTriageEnv, GithubIssueTriageAction
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `label` | `string` | Always | `bug` · `feature` · `docs` · `question` |
+| `team` | `string\|null` | Medium + Hard | `frontend` · `backend` · `ml` · `devops` · `docs` |
+| `priority` | `string\|null` | Hard only | `critical` · `high` · `medium` · `low` |
+| `suggested_action` | `string\|null` | Hard only | Brief concrete fix recommendation |
+| `reasoning` | `string\|null` | Optional | Agent's justification (not graded) |
 
-# Connect to this Space
-async with GithubIssueTriageEnv(
-    base_url="https://om192006-github-issue-triage.hf.space"
-) as env:
+### Observation Space
 
-    # Start easy task
-    result = await env.reset(task_id="easy")
-    print(result.observation.issue_title)
-    print(result.observation.task_description)
-
-    # Agent makes a decision
-    action = GithubIssueTriageAction(label="bug")
-    result = await env.step(action)
-
-    print(result.reward)               # 0.0 to 1.0
-    print(result.observation.feedback) # what was right/wrong
-```
-
-### Hard Task Example
-
-```python
-action = GithubIssueTriageAction(
-    label="bug",
-    team="backend",
-    priority="critical",
-    suggested_action="Investigate memory allocation in file_handler.py and add upload size validation.",
-    reasoning="Stack trace shows MemoryError after recent update."
-)
-result = await env.step(action)
-print(result.reward)  # up to 1.0
-```
+| Field | Type | Description |
+|---|---|---|
+| `issue_id` | `string` | GitHub issue number |
+| `issue_title` | `string` | Title of the issue |
+| `issue_body` | `string` | Full issue body |
+| `author` | `string` | Who filed the issue |
+| `existing_comments` | `list[str]` | Prior comments (context) |
+| `task_id` | `string` | Current difficulty: `easy` / `medium` / `hard` |
+| `task_description` | `string` | What the agent must do this episode |
+| `last_reward` | `float` | Reward from previous step |
+| `feedback` | `string` | Grader feedback explaining the score |
 
 ---
 
-## 📐 Action & Observation Space
+## Tasks and Grading
 
-### Action
-| Field | Type | Required | Values |
-|-------|------|----------|--------|
-| `label` | str | Always | `bug`, `feature`, `docs`, `question` |
-| `team` | str | Medium + Hard | `frontend`, `backend`, `ml`, `devops` |
-| `priority` | str | Hard only | `critical`, `high`, `medium`, `low` |
-| `suggested_action` | str | Hard only | Free text (graded by keyword matching) |
-| `reasoning` | str | Optional | Free text (for logging only) |
+### 🟢 Easy — Label Assignment
+**Objective:** Assign the correct label to the issue.  
+**Grader:** `1.0` if correct, `0.0` if wrong.  
+**Challenge level:** Straightforward for capable LLMs.
 
-### Observation
-| Field | Description |
-|-------|-------------|
-| `issue_id` | Issue number e.g. `#101` |
-| `issue_title` | Title of the GitHub issue |
-| `issue_body` | Full description |
-| `repo_name` | Repository name |
-| `author` | GitHub username |
-| `existing_comments` | Any existing comments |
-| `task_description` | What the agent needs to do |
-| `feedback` | Grader feedback from last step |
-| `last_reward` | Reward from previous action |
-| `done` | Whether episode is over |
+### 🟡 Medium — Label + Team Routing
+**Objective:** Assign correct label AND route to the correct engineering team.  
+**Grader:** `label (0.5)` + `team (0.5)` — partial credit if one is correct.  
+**Challenge level:** Requires understanding of org structure and issue context.
+
+### 🔴 Hard — Full Triage (Label + Team + Priority + Fix)
+**Objective:** Full triage decision — label, team, priority, and a concrete fix action.  
+**Grader:** `label (0.30)` + `team (0.30)` + `priority (0.20)` + `fix quality (0.20)`  
+**Challenge level:** Genuinely challenges frontier models on multi-criteria reasoning.
+
+> **Reward function design:** All rewards are continuous `[0.0, 1.0]`, providing
+> partial credit at every step. The fix suggestion uses keyword-overlap scoring so
+> specificity is rewarded — vague answers get partial credit, precise answers get full.
 
 ---
 
-## 🏆 Reward Function
+## Baseline Scores (Llama 3.1 8B via HF Router)
 
-### Easy Task
-- ✅ Correct label → `1.0`
-- ❌ Wrong label → `0.0`
-
-### Medium Task
-- ✅ Correct label → `+0.5`
-- ✅ Correct team → `+0.5`
-
-### Hard Task
-- ✅ Correct label → `+0.3`
-- ✅ Correct team → `+0.3`
-- ✅ Correct priority → `+0.2`
-- 💡 Suggested action quality → `+0.0 to 0.2` (keyword matching)
-
-Rewards are **partial** — the agent gets credit for each correct field,
-making the reward signal rich and non-sparse.
-
----
-
-## 🚀 Setup & Run Locally
-
-```bash
-# Clone and install
-git clone https://huggingface.co/spaces/om192006/github-issue-triage
-cd github-issue-triage
-uv sync
-
-# Run server locally
-uv run server
-
-# Or with Docker
-docker build -t github_issue_triage-env:latest .
-docker run -p 8000:8000 github_issue_triage-env:latest
-```
-
----
-
-## 📊 Baseline Scores
-
-Run the inference script:
-
-```bash
-export HF_TOKEN="your_token_here"
-export API_BASE_URL="https://router.huggingface.co/novita/v3/openai"
-export MODEL_NAME="meta-llama/llama-3.1-8b-instruct"
-
-uv run inference.py
-```
-
-| Task | Baseline Score (Llama 3.1 8B) |
-|------|-------------------------------|
-| Easy | 1.0000  |
-| Medium | 1.0000  |
-| Hard | 0.8667  |
+| Task | Baseline Score |
+|---|---|
+| 🟢 Easy | **1.0000** ✅ |
+| 🟡 Medium | **1.0000** ✅ |
+| 🔴 Hard | **0.8667** ✅ |
 | **Average** | **0.9556** |
 
 ---
 
-## 📁 Project Structure
+## Quick Start
 
+### Option 1 — Use the hosted Space
+```bash
+curl -X POST https://om192006-github-issue-triage.hf.space/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_id": "easy"}'
 ```
-github_issue_triage/
-├── models.py                              # Action & Observation types
-├── client.py                              # HTTP/WebSocket client
-├── inference.py                           # Hackathon inference script
-├── openenv.yaml                           # OpenEnv manifest
-├── Dockerfile                             # Container definition (root)
-├── pyproject.toml                         # Project metadata
-└── server/
-    ├── app.py                             # FastAPI server
-    └── github_issue_triage_environment.py # Environment logic + grader
+
+### Option 2 — Run locally with Docker
+```bash
+git clone https://github.com/ironman1947/github-issue-triage
+cd github-issue-triage
+
+docker build -t github-issue-triage:latest .
+docker run -d -p 8000:8000 github-issue-triage:latest
+
+# Test
+curl -X POST http://localhost:8000/reset -H "Content-Type: application/json" -d '{"task_id": "hard"}'
+```
+
+### Option 3 — Run inference script
+```bash
+pip install openenv-core openai
+export HF_TOKEN=your_hf_token
+export API_BASE_URL=https://router.huggingface.co/novita/v3/openai
+export MODEL_NAME=meta-llama/llama-3.1-8b-instruct
+export ENV_BASE_URL=https://om192006-github-issue-triage.hf.space
+
+python inference.py
+```
+
+### Validate
+```bash
+pip install openenv-core
+openenv validate
 ```
 
 ---
 
-## 🔗 Links
+## Project Structure
 
-- [OpenEnv GitHub](https://github.com/meta-pytorch/OpenEnv)
-- [Meta PyTorch OpenEnv Hackathon](https://pytorch.org/event/openenv-ai-hackathon/)
-- [Hugging Face OpenEnv Hub](https://huggingface.co/openenv)
+```
+github-issue-triage/
+├── inference.py                          # Baseline agent (run me!)
+├── models.py                             # Typed Pydantic models
+├── client.py                             # Python client helper
+├── openenv.yaml                          # OpenEnv spec metadata
+├── Dockerfile                            # Root Dockerfile
+├── README.md
+├── pyproject.toml
+└── server/
+    ├── app.py                            # FastAPI server
+    └── github_issue_triage_environment.py  # Environment + grader logic
+```
+
+---
+
+## Real-World Motivation
+
+GitHub issue triage is a **bottleneck in every software team**. Issues pile up
+unlabelled, unassigned, with no priority. Human triagers spend hours per week on
+this. This environment enables:
+
+- **Training** LLM agents to triage automatically
+- **Evaluating** how well a model understands developer context
+- **Benchmarking** different models on a grounded, reproducible task
+
+Companies like GitHub, GitLab, Linear, and Jira are actively investing in
+AI-powered triage — this environment enables RL research directly applicable to that.
+
+---
+
+## Team
+
+| Name | Role |
+|---|---|
+| Om Chougule | Team Lead · Environment Design · Backend |
+| Shraman Patil | Grader Logic · Inference Script |
+
+**Team:** Astra.AI  
+**Hackathon:** Meta PyTorch OpenEnv Hackathon × Scaler School of Technology  
+**GitHub:** https://github.com/ironman1947/github-issue-triage

@@ -1,394 +1,472 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
 """
-GitHub Issue Triage Environment Implementation.
+GitHub Issue Triage Environment — OpenEnv Hackathon
+Team Astra.AI: Om Chougule (Lead), Shraman Patil
 
-The agent reads real-world style GitHub issues and must triage them.
+Real-world task: An AI agent reads GitHub issues and makes structured triage
+decisions (labelling, team routing, priority scoring, fix suggestion).
 
-3 Tasks:
-  - easy   → assign correct LABEL only
-  - medium → assign correct LABEL + TEAM
-  - hard   → assign correct LABEL + TEAM + PRIORITY + suggest a fix action
+Tasks:
+  easy   — assign correct label (bug / feature / docs / question)
+  medium — assign correct label + correct team
+  hard   — assign label + team + priority + suggest a concrete fix action
+
+Grader:
+  easy   → label correct = 1.0,  wrong = 0.0
+  medium → label (0.5) + team (0.5)
+  hard   → label (0.30) + team (0.30) + priority (0.20) + fix keywords (0.20)
 """
 
 import random
-from uuid import uuid4
-
-from openenv.core.env_server.interfaces import Environment
-from openenv.core.env_server.types import State
+import uuid
+from typing import Optional
 
 try:
-    from models import GithubIssueTriageAction, GithubIssueTriageObservation
+    from models import (
+        GithubIssueTriageAction,
+        GithubIssueTriageObservation,
+        GithubIssueTriageState,
+    )
 except ImportError:
-    import sys, os
+    import sys
+    import os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-    from models import GithubIssueTriageAction, GithubIssueTriageObservation
+    from models import (
+        GithubIssueTriageAction,
+        GithubIssueTriageObservation,
+        GithubIssueTriageState,
+    )
 
+from openenv.core.env_server import Environment
 
-# ──────────────────────────────────────────────────────────────
-# DATASET — realistic GitHub issues with ground truth answers
-# ──────────────────────────────────────────────────────────────
-ISSUES = [
+# ── Issue Dataset ─────────────────────────────────────────────────────────────
+# Each issue has hidden ground-truth fields used only by the grader.
+# The agent never sees these — it only sees title, body, author, comments.
+ISSUE_DATASET = [
+    # ── BUG issues ────────────────────────────────────────────────────────────
     {
-        "issue_id": "#101",
-        "repo_name": "meta-pytorch/OpenEnv",
-        "issue_title": "App crashes when uploading files larger than 10MB",
-        "issue_body": (
-            "When I try to upload a file larger than 10MB, the application crashes "
-            "with a 500 Internal Server Error. This worked fine in v1.2.0 but broke "
-            "after the latest update. Stack trace: MemoryError at file_handler.py line 42."
+        "id": "#101",
+        "title": "NullPointerException on login with Google SSO",
+        "body": (
+            "After the latest deploy (v2.4.1) clicking 'Sign in with Google' throws a "
+            "NullPointerException in the auth middleware. Stack trace:\n"
+            "  AuthMiddleware.java:87 — userToken is null\n"
+            "Reproducible on Chrome 124 and Firefox 125. Safari unaffected."
         ),
-        "author": "dev_user99",
-        "existing_comments": ["I can reproduce this on Linux too.", "Same issue on Windows."],
+        "author": "mobile_dev_03",
+        "comments": [
+            "Confirmed on staging as well.",
+            "Seems related to the OAuth library upgrade in #98.",
+        ],
         "label": "bug",
         "team": "backend",
-        "priority": "high",
-        "fix_keywords": ["memory", "file", "upload", "handler", "limit"],
+        "priority": "critical",
+        "fix_keywords": ["oauth", "token", "null", "auth", "middleware", "sso"],
     },
     {
-        "issue_id": "#102",
-        "repo_name": "meta-pytorch/OpenEnv",
-        "issue_title": "Add dark mode support to the dashboard",
-        "issue_body": (
+        "id": "#102",
+        "title": "Add dark mode support to the dashboard",
+        "body": (
             "Many users have requested a dark mode for the dashboard UI. "
             "This would improve usability during night-time usage and reduce eye strain. "
             "Please consider adding a toggle in the settings page."
         ),
         "author": "ux_designer_01",
-        "existing_comments": ["Would love this!", "+1 from our team."],
+        "comments": ["Would love this!", "+1 from our team."],
         "label": "feature",
         "team": "frontend",
         "priority": "medium",
-        "fix_keywords": ["dark", "mode", "theme", "css", "toggle", "ui"],
+        "fix_keywords": ["dark", "theme", "css", "toggle", "settings", "ui"],
     },
     {
-        "issue_id": "#103",
-        "repo_name": "meta-pytorch/OpenEnv",
-        "issue_title": "README missing setup instructions for Windows",
-        "issue_body": (
-            "The README only has setup instructions for Linux and Mac. "
-            "Windows users are left without guidance. Could someone add "
-            "Windows-specific steps for installation and running the server?"
+        "id": "#103",
+        "title": "API docs missing authentication section",
+        "body": (
+            "The REST API documentation at docs.example.com/api does not include "
+            "any examples of how to pass Bearer tokens or API keys. New integrators "
+            "are confused. We need a complete authentication section with curl examples."
         ),
-        "author": "windows_user42",
-        "existing_comments": [],
+        "author": "enterprise_customer_42",
+        "comments": ["I spent 2 hours on this. Please fix ASAP."],
         "label": "docs",
-        "team": "devops",
-        "priority": "low",
-        "fix_keywords": ["readme", "windows", "setup", "install", "documentation"],
+        "team": "docs",
+        "priority": "high",
+        "fix_keywords": ["documentation", "api", "authentication", "bearer", "token", "example"],
     },
     {
-        "issue_id": "#104",
-        "repo_name": "meta-pytorch/OpenEnv",
-        "issue_title": "Model training loss goes to NaN after epoch 3",
-        "issue_body": (
-            "When training the default model configuration, the loss becomes NaN "
-            "after epoch 3. I tried reducing the learning rate but it did not help. "
-            "This happens consistently on both GPU and CPU. "
-            "Gradient clipping does not seem to fix it either."
+        "id": "#104",
+        "title": "How do I export data to CSV?",
+        "body": (
+            "I'm trying to export my project data to a CSV file but I can't find the option "
+            "anywhere in the UI. Is there a way to do this? I checked the docs but couldn't find it."
         ),
-        "author": "ml_researcher_07",
-        "existing_comments": ["Could be a numerical stability issue.", "Try checking for inf in inputs."],
-        "label": "bug",
-        "team": "ml",
-        "priority": "critical",
-        "fix_keywords": ["nan", "loss", "gradient", "training", "numerical", "stability"],
+        "author": "new_user_99",
+        "comments": ["Check Settings → Export.", "Also see the FAQ section."],
+        "label": "question",
+        "team": "docs",
+        "priority": "low",
+        "fix_keywords": ["export", "csv", "download", "settings", "guide"],
     },
     {
-        "issue_id": "#105",
-        "repo_name": "meta-pytorch/OpenEnv",
-        "issue_title": "How do I configure custom environment variables?",
-        "issue_body": (
+        "id": "#105",
+        "title": "How do I configure custom environment variables?",
+        "body": (
             "I am trying to configure custom environment variables for my deployment "
             "but I cannot find any documentation on this. "
             "Is there a config file or a CLI flag I should use?"
         ),
         "author": "new_contributor_22",
-        "existing_comments": ["Check the openenv.yaml file.", "Also see the README deployment section."],
+        "comments": ["Check the openenv.yaml file.", "Also see the README deployment section."],
         "label": "question",
-        "team": "devops",
+        "team": "docs",
         "priority": "low",
-        "fix_keywords": ["config", "env", "variable", "yaml", "documentation"],
+        "fix_keywords": ["environment", "variable", "config", "yaml", "cli", "documentation"],
     },
     {
-        "issue_id": "#106",
-        "repo_name": "meta-pytorch/OpenEnv",
-        "issue_title": "Login button unresponsive on Safari browser",
-        "issue_body": (
-            "The login button does not respond on Safari version 17.x. "
-            "Clicking it does nothing — no error, no redirect. "
-            "Works fine on Chrome and Firefox. Console shows: "
-            "TypeError: undefined is not a function at login.js:88."
+        "id": "#106",
+        "title": "ML model inference latency spikes to 10s every 5 minutes",
+        "body": (
+            "Our production ML pipeline shows periodic latency spikes: every ~5 minutes "
+            "inference time jumps from 200ms to 10s for ~30 seconds, then recovers. "
+            "CPU and memory look normal. GPU utilization drops during the spike. "
+            "Logs show 'CUDA context switch' warnings."
         ),
-        "author": "qa_tester_03",
-        "existing_comments": ["Confirmed on Safari 17.2 on macOS Sonoma."],
+        "author": "ml_infra_lead",
+        "comments": [
+            "Possibly GC pauses in the Python runtime?",
+            "Or CUDA memory fragmentation after large batches.",
+        ],
         "label": "bug",
-        "team": "frontend",
-        "priority": "high",
-        "fix_keywords": ["safari", "login", "javascript", "browser", "typeerror"],
-    },
-    {
-        "issue_id": "#107",
-        "repo_name": "meta-pytorch/OpenEnv",
-        "issue_title": "Add support for batch inference in the API",
-        "issue_body": (
-            "Currently the API only supports single-item inference. "
-            "Adding batch support would significantly improve throughput "
-            "for production use cases. A simple list input format would suffice."
-        ),
-        "author": "prod_engineer_11",
-        "existing_comments": [],
-        "label": "feature",
         "team": "ml",
         "priority": "high",
-        "fix_keywords": ["batch", "inference", "api", "throughput", "list"],
+        "fix_keywords": ["cuda", "gpu", "latency", "inference", "memory", "fragmentation", "profiling"],
     },
     {
-        "issue_id": "#108",
-        "repo_name": "meta-pytorch/OpenEnv",
-        "issue_title": "Docker container runs out of memory on startup",
-        "issue_body": (
+        "id": "#107",
+        "title": "Add Prometheus metrics endpoint for monitoring",
+        "body": (
+            "We need a /metrics endpoint that exposes Prometheus-compatible metrics: "
+            "request count, p50/p95/p99 latency, error rate, active connections. "
+            "This is needed for our SRE team to set up alerting."
+        ),
+        "author": "sre_engineer_07",
+        "comments": ["This would also help with capacity planning.", "FastAPI has a plugin for this."],
+        "label": "feature",
+        "team": "devops",
+        "priority": "high",
+        "fix_keywords": ["prometheus", "metrics", "monitoring", "endpoint", "alerting", "fastapi"],
+    },
+    {
+        "id": "#108",
+        "title": "Docker container runs out of memory on startup",
+        "body": (
             "The Docker container exits with OOM (Out of Memory) error during startup "
-            "even on machines with 16GB RAM. "
-            "docker run -p 8000:8000 my-env:latest fails immediately. "
+            "even on machines with 16GB RAM. docker run -p 8000:8000 my-env:latest fails immediately. "
             "No issues before the last release."
         ),
         "author": "devops_lead_05",
-        "existing_comments": ["Try setting --memory=8g flag.", "Check for memory leaks in init."],
+        "comments": ["Try setting --memory=8g flag.", "Check for memory leaks in init."],
         "label": "bug",
         "team": "devops",
         "priority": "critical",
-        "fix_keywords": ["docker", "memory", "oom", "container", "startup"],
+        "fix_keywords": ["memory", "oom", "docker", "startup", "leak", "container", "profile"],
+    },
+    {
+        "id": "#109",
+        "title": "Add support for SAML 2.0 single sign-on",
+        "body": (
+            "Our enterprise customers require SAML 2.0 SSO for compliance. "
+            "Currently only OAuth2/OIDC is supported. We need SAML metadata exchange, "
+            "IdP-initiated login, and SP-initiated login flows."
+        ),
+        "author": "enterprise_sales_03",
+        "comments": ["Blocker for 3 enterprise deals.", "Okta and Azure AD are the main IdPs needed."],
+        "label": "feature",
+        "team": "backend",
+        "priority": "high",
+        "fix_keywords": ["saml", "sso", "authentication", "enterprise", "okta", "idp"],
+    },
+    {
+        "id": "#110",
+        "title": "What Python versions are supported?",
+        "body": (
+            "I want to know which Python versions are officially supported. "
+            "I'm running Python 3.9 and getting import warnings. "
+            "The README doesn't mention minimum Python version."
+        ),
+        "author": "open_source_contrib_11",
+        "comments": ["Python 3.10+ is recommended.", "See pyproject.toml for constraints."],
+        "label": "question",
+        "team": "docs",
+        "priority": "low",
+        "fix_keywords": ["python", "version", "compatibility", "readme", "support", "documentation"],
+    },
+    {
+        "id": "#111",
+        "title": "Race condition in concurrent session handling causes data corruption",
+        "body": (
+            "Under load (>50 concurrent users), we see data from one user's session "
+            "leaking into another user's response. This is a critical data privacy bug. "
+            "Reproducible with locust at 50 VUs. Happens ~3% of requests."
+        ),
+        "author": "security_researcher_01",
+        "comments": [
+            "This is a serious security vulnerability.",
+            "Likely a thread-safety issue in the session store.",
+        ],
+        "label": "bug",
+        "team": "backend",
+        "priority": "critical",
+        "fix_keywords": ["race", "concurrency", "session", "thread", "lock", "mutex", "data", "privacy"],
+    },
+    {
+        "id": "#112",
+        "title": "Add batch prediction API endpoint",
+        "body": (
+            "Currently predictions must be sent one at a time. "
+            "We need a POST /predict/batch endpoint that accepts an array of inputs "
+            "and returns an array of results. This would reduce API call overhead by 10x."
+        ),
+        "author": "data_scientist_08",
+        "comments": ["This would unblock our pipeline.", "+1, very needed for production use."],
+        "label": "feature",
+        "team": "ml",
+        "priority": "medium",
+        "fix_keywords": ["batch", "prediction", "api", "endpoint", "array", "throughput"],
     },
 ]
 
-# ──────────────────────────────────────────────────────────────
-# VALID VALUES
-# ──────────────────────────────────────────────────────────────
 VALID_LABELS = {"bug", "feature", "docs", "question"}
-VALID_TEAMS = {"frontend", "backend", "ml", "devops"}
+VALID_TEAMS = {"frontend", "backend", "ml", "devops", "docs"}
 VALID_PRIORITIES = {"critical", "high", "medium", "low"}
 
-# ──────────────────────────────────────────────────────────────
-# TASK DESCRIPTIONS shown to the agent
-# ──────────────────────────────────────────────────────────────
-TASK_DESCRIPTIONS = {
-    "easy": (
-        "TASK (Easy): Read the GitHub issue carefully and assign the correct LABEL.\n"
-        "Valid labels: 'bug', 'feature', 'docs', 'question'.\n"
-        "Only the 'label' field in your action will be graded."
-    ),
-    "medium": (
-        "TASK (Medium): Read the GitHub issue and assign the correct LABEL and TEAM.\n"
-        "Valid labels: 'bug', 'feature', 'docs', 'question'.\n"
-        "Valid teams: 'frontend', 'backend', 'ml', 'devops'.\n"
-        "Both 'label' and 'team' fields will be graded."
-    ),
-    "hard": (
-        "TASK (Hard): Read the GitHub issue and assign the correct LABEL, TEAM, and PRIORITY.\n"
-        "Also provide a short 'suggested_action' (first fix step).\n"
-        "Valid labels: 'bug', 'feature', 'docs', 'question'.\n"
-        "Valid teams: 'frontend', 'backend', 'ml', 'devops'.\n"
-        "Valid priorities: 'critical', 'high', 'medium', 'low'.\n"
-        "All four fields will be graded."
-    ),
-}
 
-
-# ──────────────────────────────────────────────────────────────
-# GRADER — scores agent action against ground truth
-# ──────────────────────────────────────────────────────────────
+# ── Grader ────────────────────────────────────────────────────────────────────
 def grade_action(
-    action: GithubIssueTriageAction,
+    action: "GithubIssueTriageAction",
     issue: dict,
     task_id: str,
 ) -> tuple[float, str]:
     """
-    Grade the agent's action and return (reward, feedback_message).
+    Returns (reward: float in [0,1], feedback: str).
 
-    Scoring:
-      easy   → label correct = 1.0, wrong = 0.0
-      medium → label(0.5) + team(0.5)
-      hard   → label(0.3) + team(0.3) + priority(0.2) + action_quality(0.2)
+    easy   → label correct = 1.0 | wrong = 0.0
+    medium → label (0.5) + team (0.5)
+    hard   → label (0.30) + team (0.30) + priority (0.20) + fix keywords (0.20)
     """
-    reward = 0.0
-    feedback_parts = []
+    if not issue:
+        return 0.0, "No issue loaded — call reset() first."
 
-    label_correct = action.label.lower() == issue["label"]
-    team_correct = (action.team or "").lower() == issue["team"]
-    priority_correct = (action.priority or "").lower() == issue["priority"]
+    label_correct = (action.label or "").lower().strip() == issue["label"]
+    team_correct = (action.team or "").lower().strip() == issue["team"]
+    priority_correct = (action.priority or "").lower().strip() == issue["priority"]
 
-    # Check suggested_action quality (keyword matching)
-    action_text = (action.suggested_action or "").lower()
-    keyword_hits = sum(1 for kw in issue["fix_keywords"] if kw in action_text)
-    action_score = min(keyword_hits / max(len(issue["fix_keywords"]), 1), 1.0)
+    # Fix suggestion quality: keyword overlap with ground truth
+    fix_score = 0.0
+    if action.suggested_action:
+        text = action.suggested_action.lower()
+        keywords = issue.get("fix_keywords", [])
+        if keywords:
+            hits = sum(1 for kw in keywords if kw in text)
+            fix_score = min(hits / max(len(keywords) * 0.4, 1), 1.0)
 
+    # ── Easy ──────────────────────────────────────────────────────────────
     if task_id == "easy":
         if label_correct:
-            reward = 1.0
-            feedback_parts.append(f"✅ Correct label '{issue['label']}'! Full marks.")
+            return 1.0, f"✅ Correct label '{action.label}'! Full marks."
         else:
-            reward = 0.0
-            feedback_parts.append(
-                f"❌ Wrong label '{action.label}'. Correct: '{issue['label']}'."
+            return 0.0, (
+                f"❌ Wrong label '{action.label}'. "
+                f"Correct answer: '{issue['label']}'."
             )
 
-    elif task_id == "medium":
+    # ── Medium ────────────────────────────────────────────────────────────
+    if task_id == "medium":
+        reward = 0.0
+        parts = []
         if label_correct:
             reward += 0.5
-            feedback_parts.append(f"✅ Correct label '{issue['label']}' (+0.5).")
+            parts.append("✅ label correct (+0.5)")
         else:
-            feedback_parts.append(
-                f"❌ Wrong label '{action.label}'. Correct: '{issue['label']}' (+0.0)."
-            )
+            parts.append(f"❌ label wrong (got '{action.label}', expected '{issue['label']}')")
         if team_correct:
             reward += 0.5
-            feedback_parts.append(f"✅ Correct team '{issue['team']}' (+0.5).")
+            parts.append("✅ team correct (+0.5)")
         else:
-            feedback_parts.append(
-                f"❌ Wrong team '{action.team}'. Correct: '{issue['team']}' (+0.0)."
-            )
+            parts.append(f"❌ team wrong (got '{action.team}', expected '{issue['team']}')")
+        return round(reward, 4), " | ".join(parts)
 
-    elif task_id == "hard":
+    # ── Hard ──────────────────────────────────────────────────────────────
+    if task_id == "hard":
+        reward = 0.0
+        parts = []
         if label_correct:
-            reward += 0.3
-            feedback_parts.append(f"✅ Correct label '{issue['label']}' (+0.3).")
+            reward += 0.30
+            parts.append("✅ label (+0.30)")
         else:
-            feedback_parts.append(
-                f"❌ Wrong label '{action.label}'. Correct: '{issue['label']}' (+0.0)."
-            )
+            parts.append(f"❌ label (got '{action.label}', exp '{issue['label']}')")
         if team_correct:
-            reward += 0.3
-            feedback_parts.append(f"✅ Correct team '{issue['team']}' (+0.3).")
+            reward += 0.30
+            parts.append("✅ team (+0.30)")
         else:
-            feedback_parts.append(
-                f"❌ Wrong team '{action.team}'. Correct: '{issue['team']}' (+0.0)."
-            )
+            parts.append(f"❌ team (got '{action.team}', exp '{issue['team']}')")
         if priority_correct:
-            reward += 0.2
-            feedback_parts.append(f"✅ Correct priority '{issue['priority']}' (+0.2).")
+            reward += 0.20
+            parts.append("✅ priority (+0.20)")
         else:
-            feedback_parts.append(
-                f"❌ Wrong priority '{action.priority}'. Correct: '{issue['priority']}' (+0.0)."
-            )
-        # Partial credit for suggested action
-        reward += action_score * 0.2
-        feedback_parts.append(
-            f"💡 Suggested action score: {action_score:.1f} "
-            f"(keywords matched: {keyword_hits}/{len(issue['fix_keywords'])}) "
-            f"(+{action_score * 0.2:.2f})."
-        )
+            parts.append(f"❌ priority (got '{action.priority}', exp '{issue['priority']}')")
+        if fix_score > 0:
+            partial = round(fix_score * 0.20, 4)
+            reward += partial
+            parts.append(f"✅ fix suggestion (+{partial:.2f})")
+        else:
+            parts.append("❌ fix suggestion (no relevant keywords)")
+        return round(reward, 4), " | ".join(parts)
 
-    reward = max(0.01, min(0.99, reward))
-    return round(reward, 4), " | ".join(feedback_parts)
+    return 0.0, f"Unknown task_id '{task_id}'"
 
 
-# ──────────────────────────────────────────────────────────────
-# ENVIRONMENT CLASS
-# ──────────────────────────────────────────────────────────────
+# ── Environment ───────────────────────────────────────────────────────────────
 class GithubIssueTriageEnvironment(Environment):
     """
-    GitHub Issue Triage Environment.
-
-    The agent is shown a GitHub issue and must triage it correctly.
-    Each episode = one issue to triage.
-    The agent gets one step per episode (one decision per issue).
+    OpenEnv-compliant environment for GitHub Issue Triage.
+    One episode = one issue to triage. Clean state on every reset().
     """
 
-    SUPPORTS_CONCURRENT_SESSIONS: bool = True
+    # Each request creates a fresh env with isolated state — safe for concurrency
+    SUPPORTS_CONCURRENT_SESSIONS = True
 
-    def __init__(self):
-        self._state = State(episode_id=str(uuid4()), step_count=0)
-        self._task_id: str = "easy"
+    def __init__(self) -> None:
+        super().__init__()
+        self._state = GithubIssueTriageState()
         self._current_issue: dict = {}
+        self._task_id: str = "easy"
         self._done: bool = False
-        self._last_reward: float = 0.0
-        self._last_feedback: str = ""
+        # Separate random pools per task so issues cycle without repetition
+        self._pools: dict[str, list] = {tid: [] for tid in ("easy", "medium", "hard")}
 
+    # ── Internal helpers ──────────────────────────────────────────────────
+    def _pick_issue(self, task_id: str) -> dict:
+        """Return a random issue, refilling the pool when exhausted."""
+        pool = self._pools[task_id]
+        if not pool:
+            pool = list(ISSUE_DATASET)
+            random.shuffle(pool)
+            self._pools[task_id] = pool
+        return pool.pop()
+
+    def _build_observation(self, issue: dict, task_id: str,
+                           feedback: str = "", last_reward: float = 0.0,
+                           step_number: int = 0) -> "GithubIssueTriageObservation":
+        if task_id == "easy":
+            task_desc = (
+                "TASK (Easy): Read the GitHub issue carefully and assign the correct LABEL.\n"
+                "Valid labels: 'bug', 'feature', 'docs', 'question'.\n"
+                "Only the 'label' field in your action will be graded."
+            )
+        elif task_id == "medium":
+            task_desc = (
+                "TASK (Medium): Read the GitHub issue and assign the correct LABEL and TEAM.\n"
+                "Valid labels: 'bug', 'feature', 'docs', 'question'.\n"
+                "Valid teams: 'frontend', 'backend', 'ml', 'devops', 'docs'.\n"
+                "Both label and team fields will be graded (0.5 each)."
+            )
+        else:
+            task_desc = (
+                "TASK (Hard): Read the GitHub issue and assign LABEL, TEAM, PRIORITY, "
+                "and SUGGESTED_ACTION.\n"
+                "Valid labels: 'bug', 'feature', 'docs', 'question'.\n"
+                "Valid teams: 'frontend', 'backend', 'ml', 'devops', 'docs'.\n"
+                "Valid priorities: 'critical', 'high', 'medium', 'low'.\n"
+                "All four fields are graded: label (30%) + team (30%) + priority (20%) + fix (20%)."
+            )
+
+        if not feedback:
+            feedback = "Read the issue carefully and make your triage decision."
+
+        return GithubIssueTriageObservation(
+            issue_id=issue["id"],
+            issue_title=issue["title"],
+            issue_body=issue["body"],
+            repo_name="meta-pytorch/OpenEnv",
+            author=issue["author"],
+            existing_comments=issue["comments"],
+            task_id=task_id,
+            task_description=task_desc,
+            last_reward=last_reward,
+            feedback=feedback,
+            step_number=step_number,
+        )
+
+    # ── OpenEnv API ───────────────────────────────────────────────────────
     def reset(
         self,
-        task_id: str = "easy",
-        issue_index: int = -1,
-    ) -> GithubIssueTriageObservation:
-        """
-        Reset the environment for a new episode.
-
-        Args:
-            task_id: 'easy', 'medium', or 'hard'
-            issue_index: which issue to use (-1 = random)
-        """
-        self._state = State(episode_id=str(uuid4()), step_count=0)
-        self._task_id = task_id if task_id in TASK_DESCRIPTIONS else "easy"
-        self._done = False
-        self._last_reward = 0.0
-        self._last_feedback = ""
-
-        # Pick an issue
-        if issue_index >= 0 and issue_index < len(ISSUES):
-            self._current_issue = ISSUES[issue_index]
+        task_id: Optional[str] = None,
+        seed: Optional[int] = None,
+        **kwargs,
+    ) -> "GithubIssueTriageObservation":
+        """Start a new episode. Picks a random issue for the given task."""
+        if task_id and task_id in ("easy", "medium", "hard"):
+            self._task_id = task_id
         else:
-            self._current_issue = random.choice(ISSUES)
+            self._task_id = "easy"
 
+        if seed is not None:
+            random.seed(seed)
+
+        self._current_issue = self._pick_issue(self._task_id)
+        self._done = False
+        self._state = GithubIssueTriageState(
+            episode_id=str(uuid.uuid4()),
+            task_id=self._task_id,
+            issue_id=self._current_issue["id"],
+        )
         return self._build_observation(
-            feedback="Read the issue carefully and make your triage decision.",
-            done=False,
+            self._current_issue, self._task_id, step_number=0
         )
 
     def step(
-        self, action: GithubIssueTriageAction
-    ) -> GithubIssueTriageObservation:
-        """
-        The agent submits its triage decision.
-        One step per episode — grade it and mark done.
-        """
+        self, action: "GithubIssueTriageAction", task_id: Optional[str] = None, **kwargs,
+    ) -> "GithubIssueTriageObservation":
+        """Grade the agent's triage decision and return result."""
         self._state.step_count += 1
 
-        # Auto-reset if no issue loaded (e.g. fresh container, no reset called)
+        # In stateless HTTP mode, each call creates a fresh env.
+        # Use task_id from request if provided, otherwise fall back to instance default.
+        effective_task_id = task_id if task_id in ("easy", "medium", "hard") else self._task_id
+
+        # Auto-reset if called before reset() (stateless HTTP mode)
         if not self._current_issue:
-                    self.reset()
+            self.reset(task_id=effective_task_id)
 
         if self._done:
             return self._build_observation(
-                feedback="Episode already finished. Call reset() to start a new one.",
-                done=True,
+                self._current_issue,
+                self._task_id,
+                feedback="Episode already done. Call reset() to start a new episode.",
+                last_reward=0.0,
+                step_number=self._state.step_count,
             )
 
-        # Grade the action
         reward, feedback = grade_action(action, self._current_issue, self._task_id)
-        self._last_reward = reward
-        self._last_feedback = feedback
-        self._done = True  # one issue = one step = episode done
+        self._done = True  # single-step episode
+        self._state.total_reward += reward
+        self._state.last_reward = reward
 
-        return self._build_observation(feedback=feedback, done=True, reward=reward)
-
-    def _build_observation(
-        self,
-        feedback: str,
-        done: bool,
-        reward: float = 0.0,
-    ) -> GithubIssueTriageObservation:
-        """Helper to build observation from current state."""
-        issue = self._current_issue
-        return GithubIssueTriageObservation(
-            issue_id=issue.get("issue_id", ""),
-            issue_title=issue.get("issue_title", ""),
-            issue_body=issue.get("issue_body", ""),
-            repo_name=issue.get("repo_name", ""),
-            author=issue.get("author", ""),
-            existing_comments=issue.get("existing_comments", []),
-            task_id=self._task_id,
-            task_description=TASK_DESCRIPTIONS.get(self._task_id, ""),
-            last_reward=self._last_reward,
+        obs = self._build_observation(
+            self._current_issue,
+            self._task_id,
             feedback=feedback,
-            done=done,
+            last_reward=reward,
             step_number=self._state.step_count,
-            reward=reward,
         )
+        # Set reward/done on the base Observation fields so the server serializes them
+        obs.reward = reward
+        obs.done = True
+        return obs
 
-    @property
-    def state(self) -> State:
+    def state(self) -> "GithubIssueTriageState":
         return self._state
+
+    def close(self) -> None:
+        """Clean up resources (nothing to clean for this environment)."""
+        pass

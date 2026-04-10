@@ -1,132 +1,168 @@
+#!/usr/bin/env python3
 """
-inference.py — GitHub Issue Triage Environment
-===============================================
-Hackathon inference script.
+GitHub Issue Triage — OpenEnv Hackathon Inference Script
+Team Astra.AI: Om Chougule (Lead), Shraman Patil
 
-Runs an LLM agent against the GitHub Issue Triage environment
-across all 3 tasks (easy, medium, hard) and logs results in the
-required [START] / [STEP] / [END] format.
-
-Usage:
-    uv run inference.py
-
-Required environment variables:
-    API_BASE_URL   → HF Router base URL
-    MODEL_NAME     → Model identifier
-    HF_TOKEN       → Your Hugging Face token (used as API key)
+Mandatory log format: [START] / [STEP] / [END]
+All LLM calls use OpenAI client configured via environment variables.
 """
 
-import asyncio
 import json
 import os
 import sys
-from typing import List
+from typing import List, Optional
 
 from openai import OpenAI
 
-# ──────────────────────────────────────────
-# CONFIG — read from environment variables
-# ──────────────────────────────────────────
-API_BASE_URL = os.environ.get(
+# ── Environment variables (mandatory per spec) ────────────────────────────────
+API_BASE_URL: str = os.environ.get(
     "API_BASE_URL", "https://router.huggingface.co/novita/v3/openai"
 )
-MODEL_NAME = os.environ.get(
+MODEL_NAME: str = os.environ.get(
     "MODEL_NAME", "meta-llama/llama-3.1-8b-instruct"
 )
-API_KEY = os.environ.get("HF_TOKEN", "")
+API_KEY: str = os.environ.get("HF_TOKEN", "")          # no default — required
+ENV_BASE_URL: str = os.environ.get(
+    "ENV_BASE_URL", "https://om192006-github-issue-triage.hf.space"
+)
 
-ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:8000")
-IMAGE_NAME = os.environ.get("IMAGE_NAME", "github_issue_triage-env:latest")
+# ── Inference hyper-params ────────────────────────────────────────────────────
+TEMPERATURE: float = 0.2
+MAX_TOKENS: int = 512
+MAX_STEPS: int = 1          # single-step episode: one triage decision per issue
+SUCCESS_SCORE_THRESHOLD: float = 0.7
 
-MAX_STEPS = 1          # one triage decision per episode
-TEMPERATURE = 0.2
-MAX_TOKENS = 512
+TASK_IDS: List[str] = ["easy", "medium", "hard"]
+BENCHMARK: str = "github_issue_triage"
 
-# Tasks to evaluate
-TASKS = ["easy", "medium", "hard"]
-MAX_TOTAL_REWARD = len(TASKS) * 1.0   # max possible = 3.0
-SUCCESS_THRESHOLD = 0.6                # 60% = pass
+# ── Reward weights per task (must sum to MAX_TOTAL_REWARD per task) ──────────
+MAX_TOTAL_REWARD: float = 1.0   # per task, clamped to [0,1]
 
-# ──────────────────────────────────────────
-# SYSTEM PROMPT
-# ──────────────────────────────────────────
-SYSTEM_PROMPT = """You are an expert GitHub issue triager working on the meta-pytorch/OpenEnv repository.
+# ── System prompt ─────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are an expert GitHub issue triager at a large software company.
+Your job is to read a GitHub issue and make a structured triage decision.
 
-You will be shown a GitHub issue. Your job is to triage it by responding with a JSON object.
+Always respond with ONLY a valid JSON object — no markdown, no explanation, no extra text.
 
-The JSON must have these fields:
-  - "label"            : one of "bug", "feature", "docs", "question"
-  - "team"             : one of "frontend", "backend", "ml", "devops"
-  - "priority"         : one of "critical", "high", "medium", "low"
-  - "suggested_action" : a short first fix step (1-2 sentences)
-  - "reasoning"        : brief explanation of your decision
-
-Respond ONLY with valid JSON. No extra text, no markdown, no code blocks.
-
-Example response:
+JSON schema:
 {
-  "label": "bug",
-  "team": "backend",
-  "priority": "high",
-  "suggested_action": "Investigate memory allocation in file_handler.py and add size validation.",
-  "reasoning": "Stack trace points to a MemoryError in file handling code after a recent update."
-}"""
+  "label": "<one of: bug | feature | docs | question>",
+  "team": "<one of: frontend | backend | ml | devops | docs | null>",
+  "priority": "<one of: critical | high | medium | low | null>",
+  "suggested_action": "<a brief concrete action the team should take, or null>",
+  "reasoning": "<one sentence explaining your decision>"
+}
+
+Rules:
+- label is ALWAYS required.
+- team is required for medium and hard tasks (set null only for easy task).
+- priority is required for hard tasks (set null for easy/medium).
+- suggested_action is required for hard tasks (set null for easy/medium).
+- Choose priority based on impact: critical=data loss/security, high=blocks users,
+  medium=degrades experience, low=minor/cosmetic.
+"""
 
 
-# ──────────────────────────────────────────
-# LOGGING — required [START] [STEP] [END] format
-# ──────────────────────────────────────────
+# ── Mandatory log helpers (exact format validated by judges) ──────────────────
 def log_start(task: str, env: str, model: str) -> None:
-    print(f"[START] task={task} env={env} model={model}", flush=True)
+    """Print [START] block. Must be first output for each task."""
+    print(
+        f"[START] task={task} env={env} model={model}",
+        flush=True,
+    )
 
 
-def log_step(step: int, action: dict, reward: float, done: bool, error=None) -> None:
-    label = action.get("label", "")
-    team = action.get("team", "")
-    print(f"[STEP] step={step} reward={reward} done={done} label={label} team={team}", flush=True)
+def log_step(
+    step: int,
+    action: str,
+    reward: float,
+    done: bool,
+    error: Optional[str] = None,
+) -> None:
+    """Print [STEP] block after each environment step."""
+    error_str = error if error is not None else "null"
+    done_str = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.4f} done={done_str} error={error_str}",
+        flush=True,
+    )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: list) -> None:
-    print(f"[END] success={success} steps={steps} score={score} rewards={rewards}", flush=True)
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    """Print [END] block as the final output for each task."""
+    rewards_str = ",".join(f"{r:.4f}" for r in rewards)
+    success_str = str(success).lower()
+    print(
+        f"[END] success={success_str} steps={steps} score={score:.4f} rewards=[{rewards_str}]",
+        flush=True,
+    )
 
 
-# ──────────────────────────────────────────
-# BUILD PROMPT from observation
-# ──────────────────────────────────────────
-def build_user_prompt(obs) -> str:
-    """Convert observation into a clear prompt for the LLM."""
-    comments_text = ""
-    if obs.existing_comments:
-        comments_text = "\n".join(
-            f"  - {c}" for c in obs.existing_comments
-        )
-        comments_text = f"\nExisting Comments:\n{comments_text}"
-
-    return f"""
-{obs.task_description}
-
----
-Repository: {obs.repo_name}
-Issue {obs.issue_id}: {obs.issue_title}
-
-Description:
-{obs.issue_body}
-{comments_text}
----
-
-Respond with a JSON object containing your triage decision.
-""".strip()
+# ── HTTP helpers (sync — avoids async client dependency) ─────────────────────
+import urllib.request
+import urllib.error
 
 
-# ──────────────────────────────────────────
-# CALL LLM
-# ──────────────────────────────────────────
-def get_agent_action(client: OpenAI, obs) -> dict:
-    """
-    Call the LLM and parse its JSON triage decision.
-    Falls back to a safe default if parsing fails.
-    """
-    user_prompt = build_user_prompt(obs)
+def _http_post(url: str, body: dict) -> dict:
+    """Simple sync HTTP POST, returns parsed JSON. Raises on error."""
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
+def env_reset(task_id: str) -> dict:
+    url = f"{ENV_BASE_URL}/reset"
+    return _http_post(url, {"task_id": task_id})
+
+
+def env_step(action: dict, task_id: str = "easy") -> dict:
+    url = f"{ENV_BASE_URL}/step"
+    return _http_post(url, {"action": action, "task_id": task_id})
+
+
+# ── LLM call ─────────────────────────────────────────────────────────────────
+def build_user_prompt(observation: dict) -> str:
+    issue = observation.get("issue_title", "")
+    body = observation.get("issue_body", "")
+    author = observation.get("author", "")
+    comments = observation.get("existing_comments", [])
+    task_desc = observation.get("task_description", "")
+    feedback = observation.get("feedback", "")
+    last_reward = observation.get("last_reward", 0.0)
+
+    comments_str = "\n".join(f"  - {c}" for c in comments) if comments else "  (none)"
+
+    return f"""=== GitHub Issue ===
+Title: {issue}
+Author: {author}
+Body:
+{body}
+
+Existing comments:
+{comments_str}
+
+=== Your Task ===
+{task_desc}
+
+Previous feedback: {feedback}
+Previous reward: {last_reward:.2f}
+
+Respond with ONLY a JSON object as specified."""
+
+
+def get_model_action(
+    client: OpenAI,
+    observation: dict,
+) -> dict:
+    """Call the LLM and return a parsed action dict. Falls back to safe default."""
+    user_prompt = build_user_prompt(observation)
+    task_id = observation.get("task_id", "easy")
 
     try:
         completion = client.chat.completions.create(
@@ -141,102 +177,98 @@ def get_agent_action(client: OpenAI, obs) -> dict:
         )
         raw = (completion.choices[0].message.content or "").strip()
 
-        # Strip markdown code fences if present
+        # Strip markdown fences if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        raw = raw.strip()
+            raw = raw.strip()
 
         parsed = json.loads(raw)
-        return parsed
+
+        # Normalise — enforce required fields exist
+        action = {
+            "label": parsed.get("label", "question"),
+            "team": parsed.get("team", None),
+            "priority": parsed.get("priority", None),
+            "suggested_action": parsed.get("suggested_action", None),
+            "reasoning": parsed.get("reasoning", "No reasoning provided"),
+        }
+        return action
 
     except Exception as exc:
-        print(f"[DEBUG] LLM call or parse failed: {exc}", flush=True)
-        # Safe fallback
-        return {
-            "label": "bug",
-            "team": "backend",
-            "priority": "medium",
-            "suggested_action": "Investigate the reported issue.",
-            "reasoning": "Fallback response due to parse error.",
-        }
+        print(f"[DEBUG] LLM call failed: {exc}", flush=True)
+        # Safe fallback — attempt a reasonable default per task
+        fallback = {"label": "bug", "team": None, "priority": None,
+                    "suggested_action": None, "reasoning": "fallback default"}
+        if task_id in ("medium", "hard"):
+            fallback["team"] = "backend"
+        if task_id == "hard":
+            fallback["priority"] = "high"
+            fallback["suggested_action"] = "investigate and fix the reported issue"
+        return fallback
 
 
-# ──────────────────────────────────────────
-# RUN ONE TASK
-# ──────────────────────────────────────────
-async def run_task(task_id: str, client: OpenAI) -> float:
+# ── Run one task episode ──────────────────────────────────────────────────────
+def run_task(client: OpenAI, task_id: str) -> float:
     """
-    Run one full episode for a given task (easy / medium / hard).
-    Returns the reward score (0.0 to 1.0).
+    Runs a single-episode task.
+    Returns normalised score in [0.0, 1.0].
     """
-    from github_issue_triage import GithubIssueTriageEnv
-    from github_issue_triage.models import GithubIssueTriageAction
-
-    log_start(task=task_id, env="github_issue_triage", model=MODEL_NAME)
-
-    reward = 0.0
+    rewards: List[float] = []
     steps_taken = 0
+    score = 0.0
     success = False
-    rewards = []
+
+    log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        # Connect to environment
-        env = await GithubIssueTriageEnv.from_docker_image(IMAGE_NAME)
+        # ── reset ──────────────────────────────────────────────────────────
+        try:
+            reset_result = env_reset(task_id)
+        except Exception as exc:
+            print(f"[DEBUG] reset() failed for task={task_id}: {exc}", flush=True)
+            log_end(success=False, steps=0, score=0.0, rewards=[])
+            return 0.0
 
-        async with env:
-            # Reset with the correct task
-            result = await env.reset(task_id=task_id)
-            obs = result.observation
+        observation = reset_result.get("observation", {})
+        done = reset_result.get("done", False)
 
-            # One step per episode
-            for step in range(1, MAX_STEPS + 1):
-                if result.done:
-                    break
+        for step in range(1, MAX_STEPS + 1):
+            if done:
+                break
 
-                # Get agent decision
-                action_dict = get_agent_action(client, obs)
+            # ── agent decides ──────────────────────────────────────────────
+            action = get_model_action(client, observation)
+            action_str = json.dumps(action)
 
-                action = GithubIssueTriageAction(
-                    label=action_dict.get("label", "bug"),
-                    team=action_dict.get("team"),
-                    priority=action_dict.get("priority"),
-                    suggested_action=action_dict.get("suggested_action"),
-                    reasoning=action_dict.get("reasoning"),
-                )
+            # ── step ───────────────────────────────────────────────────────
+            error_msg: Optional[str] = None
+            try:
+                step_result = env_step(action, task_id=task_id)
+                reward = float(step_result.get("reward", 0.0))
+                done = bool(step_result.get("done", True))
+                observation = step_result.get("observation", {})
+            except Exception as exc:
+                print(f"[DEBUG] step() failed: {exc}", flush=True)
+                reward = 0.0
+                done = True
+                error_msg = str(exc)
 
-                # Step the environment
-                result = await env.step(action)
-                obs = result.observation
-                reward = result.reward or 0.0
-                reward = min(max(reward, 0.01), 0.99)
-                done = result.done
+            rewards.append(reward)
+            steps_taken = step
 
-                rewards.append(reward)
-                steps_taken = step
+            log_step(step=step, action=action_str, reward=reward,
+                     done=done, error=error_msg)
 
-                log_step(
-                    step=step,
-                    action=action_dict,
-                    reward=reward,
-                    done=done,
-                    error=None,
-                )
-
-                if done:
-                    break
-
-        score = reward  # single step episode, reward IS the score
-        score = min(max(score, 0.01), 0.99)
-        success = score >= SUCCESS_THRESHOLD
+        # ── compute score ──────────────────────────────────────────────────
+        if rewards:
+            score = sum(rewards) / (MAX_TOTAL_REWARD * len(rewards))
+            score = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_SCORE_THRESHOLD
 
     except Exception as exc:
-        print(f"[DEBUG] Task '{task_id}' failed: {exc}", flush=True)
-        score = 0.01
-        success = False
-        rewards = [0.01]
-        steps_taken = 0
+        print(f"[DEBUG] Unexpected error in task={task_id}: {exc}", flush=True)
 
     finally:
         log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
@@ -244,40 +276,30 @@ async def run_task(task_id: str, client: OpenAI) -> float:
     return score
 
 
-# ──────────────────────────────────────────
-# MAIN — run all 3 tasks
-# ──────────────────────────────────────────
-async def main() -> None:
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main() -> None:
     if not API_KEY:
-        print("[ERROR] HF_TOKEN environment variable is not set.", flush=True)
-        sys.exit(1)
+        print("[DEBUG] WARNING: HF_TOKEN is not set. LLM calls will fail.", flush=True)
 
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    print("\n" + "="*60, flush=True)
-    print("  GitHub Issue Triage — Inference Script", flush=True)
-    print("="*60 + "\n", flush=True)
+    results = {}
+    for task_id in TASK_IDS:
+        score = run_task(client, task_id)
+        results[task_id] = score
+        print(flush=True)   # blank line between tasks for readability
 
-    all_scores = []
-
-    for task_id in TASKS:
-        print(f"\n--- Running Task: {task_id.upper()} ---\n", flush=True)
-        score = await run_task(task_id, client)
-        all_scores.append(score)
-        print(f"Task '{task_id}' score: {score:.4f}\n", flush=True)
-
-    # Final summary
-    total_score = sum(all_scores) / len(all_scores)
-    total_score = min(max(total_score, 0.01), 0.99)
-
-    print("\n" + "="*60, flush=True)
+    # ── Summary ───────────────────────────────────────────────────────────
+    total = sum(results.values()) / len(results)
+    print("=" * 60, flush=True)
     print("  FINAL RESULTS", flush=True)
-    print("="*60, flush=True)
-    for task_id, score in zip(TASKS, all_scores):
-        print(f"  {task_id.upper():8s} → {score:.4f}", flush=True)
-    print(f"  {'TOTAL':8s} → {total_score:.4f}", flush=True)
-    print("="*60 + "\n", flush=True)
+    print("=" * 60, flush=True)
+    for task_id, score in results.items():
+        bar = "✅" if score >= SUCCESS_SCORE_THRESHOLD else "❌"
+        print(f"  {task_id.upper():<8} → {score:.4f}  {bar}", flush=True)
+    print(f"  {'TOTAL':<8} → {total:.4f}", flush=True)
+    print("=" * 60, flush=True)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
