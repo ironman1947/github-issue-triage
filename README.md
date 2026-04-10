@@ -91,12 +91,17 @@ Linear, Jira auto-assign, etc.).
 
 ## Baseline Scores (Llama 3.1 8B via HF Router)
 
-| Task | Baseline Score |
-|---|---|
-| 🟢 Easy | **1.0000** ✅ |
-| 🟡 Medium | **1.0000** ✅ |
-| 🔴 Hard | **0.8667** ✅ |
-| **Average** | **0.9556** |
+Scores vary per run because issues are randomly sampled. Representative results:
+
+| Task | Score Range | Typical |
+|---|---|---|
+| 🟢 Easy | 0.0 – 1.0 | **1.0** ✅ |
+| 🟡 Medium | 0.5 – 1.0 | **0.75** |
+| 🔴 Hard | 0.6 – 1.0 | **0.85** |
+| **Average** | 0.5 – 1.0 | **~0.80** |
+
+> Binary easy task depends on which issue is sampled. Medium/Hard benefit from
+> partial credit — the model consistently scores well on label and team fields.
 
 ---
 

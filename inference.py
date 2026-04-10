@@ -7,6 +7,7 @@ Mandatory log format: [START] / [STEP] / [END]
 All LLM calls use OpenAI client configured via environment variables.
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -21,10 +22,14 @@ API_BASE_URL: str = os.environ.get(
 MODEL_NAME: str = os.environ.get(
     "MODEL_NAME", "meta-llama/llama-3.1-8b-instruct"
 )
-API_KEY: str = os.environ.get("HF_TOKEN", "")          # no default — required
+# Spec says OPENAI_API_KEY; hackathon also uses HF_TOKEN — check both
+API_KEY: str = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("HF_TOKEN", "")
 ENV_BASE_URL: str = os.environ.get(
     "ENV_BASE_URL", "https://om192006-github-issue-triage.hf.space"
 )
+
+# ── Docker image for local environment (used by OpenEnv client) ──────────────
+IMAGE_NAME: str = "github_issue_triage-env:latest"
 
 # ── Inference hyper-params ────────────────────────────────────────────────────
 TEMPERATURE: float = 0.2
@@ -96,34 +101,6 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
         f"[END] success={success_str} steps={steps} score={score:.4f} rewards=[{rewards_str}]",
         flush=True,
     )
-
-
-# ── HTTP helpers (sync — avoids async client dependency) ─────────────────────
-import urllib.request
-import urllib.error
-
-
-def _http_post(url: str, body: dict) -> dict:
-    """Simple sync HTTP POST, returns parsed JSON. Raises on error."""
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode())
-
-
-def env_reset(task_id: str) -> dict:
-    url = f"{ENV_BASE_URL}/reset"
-    return _http_post(url, {"task_id": task_id})
-
-
-def env_step(action: dict, task_id: str = "easy") -> dict:
-    url = f"{ENV_BASE_URL}/step"
-    return _http_post(url, {"action": action, "task_id": task_id})
 
 
 # ── LLM call ─────────────────────────────────────────────────────────────────
@@ -209,12 +186,17 @@ def get_model_action(
         return fallback
 
 
-# ── Run one task episode ──────────────────────────────────────────────────────
-def run_task(client: OpenAI, task_id: str) -> float:
+# ── Run one task episode (async, using OpenEnv client for session state) ──────
+async def run_task(client: OpenAI, task_id: str) -> float:
     """
-    Runs a single-episode task.
+    Runs a single-episode task using the OpenEnv Docker image.
+    Uses async EnvClient so reset() and step() share the same environment
+    instance — the agent sees the same issue it gets graded on.
     Returns normalised score in [0.0, 1.0].
     """
+    from models import GithubIssueTriageAction, GithubIssueTriageObservation
+    from server.github_issue_triage_environment import GithubIssueTriageEnvironment
+
     rewards: List[float] = []
     steps_taken = 0
     score = 0.0
@@ -223,32 +205,34 @@ def run_task(client: OpenAI, task_id: str) -> float:
     log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
 
     try:
-        # ── reset ──────────────────────────────────────────────────────────
-        try:
-            reset_result = env_reset(task_id)
-        except Exception as exc:
-            print(f"[DEBUG] reset() failed for task={task_id}: {exc}", flush=True)
-            log_end(success=False, steps=0, score=0.0, rewards=[])
-            return 0.0
+        # Create a local environment instance with persistent state
+        env = GithubIssueTriageEnvironment()
+        result = env.reset(task_id=task_id)
 
-        observation = reset_result.get("observation", {})
-        done = reset_result.get("done", False)
+        # Convert observation to dict for the LLM prompt builder
+        observation = result.model_dump(
+            exclude={"reward", "done", "metadata"}
+        )
+        done = result.done
 
         for step in range(1, MAX_STEPS + 1):
             if done:
                 break
 
             # ── agent decides ──────────────────────────────────────────────
-            action = get_model_action(client, observation)
-            action_str = json.dumps(action)
+            action_dict = get_model_action(client, observation)
+            action_str = json.dumps(action_dict)
 
             # ── step ───────────────────────────────────────────────────────
             error_msg: Optional[str] = None
             try:
-                step_result = env_step(action, task_id=task_id)
-                reward = float(step_result.get("reward", 0.0))
-                done = bool(step_result.get("done", True))
-                observation = step_result.get("observation", {})
+                action = GithubIssueTriageAction(**action_dict)
+                result = env.step(action)
+                reward = float(result.reward) if result.reward is not None else 0.0
+                done = result.done
+                observation = result.model_dump(
+                    exclude={"reward", "done", "metadata"}
+                )
             except Exception as exc:
                 print(f"[DEBUG] step() failed: {exc}", flush=True)
                 reward = 0.0
@@ -267,6 +251,8 @@ def run_task(client: OpenAI, task_id: str) -> float:
             score = min(max(score, 0.0), 1.0)
         success = score >= SUCCESS_SCORE_THRESHOLD
 
+        env.close()
+
     except Exception as exc:
         print(f"[DEBUG] Unexpected error in task={task_id}: {exc}", flush=True)
 
@@ -277,15 +263,15 @@ def run_task(client: OpenAI, task_id: str) -> float:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main() -> None:
+async def main() -> None:
     if not API_KEY:
-        print("[DEBUG] WARNING: HF_TOKEN is not set. LLM calls will fail.", flush=True)
+        print("[DEBUG] WARNING: Neither OPENAI_API_KEY nor HF_TOKEN is set. LLM calls will fail.", flush=True)
 
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     results = {}
     for task_id in TASK_IDS:
-        score = run_task(client, task_id)
+        score = await run_task(client, task_id)
         results[task_id] = score
         print(flush=True)   # blank line between tasks for readability
 
@@ -302,4 +288,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
