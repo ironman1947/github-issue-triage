@@ -272,9 +272,9 @@ def grade_action(
     # ── Easy ──────────────────────────────────────────────────────────────
     if task_id == "easy":
         if label_correct:
-            return 1.0, f"✅ Correct label '{action.label}'! Full marks."
+            return 0.99, f"✅ Correct label '{action.label}'! Full marks."
         else:
-            return 0.0, (
+            return 0.01, (
                 f"❌ Wrong label '{action.label}'. "
                 f"Correct answer: '{issue['label']}'."
             )
@@ -293,6 +293,8 @@ def grade_action(
             parts.append("✅ team correct (+0.5)")
         else:
             parts.append(f"❌ team wrong (got '{action.team}', expected '{issue['team']}')")
+        
+        reward = max(0.01, min(0.99, reward))
         return round(reward, 4), " | ".join(parts)
 
     # ── Hard ──────────────────────────────────────────────────────────────
@@ -320,9 +322,11 @@ def grade_action(
             parts.append(f"✅ fix suggestion (+{partial:.2f})")
         else:
             parts.append("❌ fix suggestion (no relevant keywords)")
+        
+        reward = max(0.01, min(0.99, reward))
         return round(reward, 4), " | ".join(parts)
 
-    return 0.0, f"Unknown task_id '{task_id}'"
+    return 0.01, f"Unknown task_id '{task_id}'"
 
 
 # ── Environment ───────────────────────────────────────────────────────────────
